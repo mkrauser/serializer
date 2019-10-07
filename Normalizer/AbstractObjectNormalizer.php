@@ -15,7 +15,9 @@ use Symfony\Component\PropertyAccess\Exception\InvalidArgumentException;
 use Symfony\Component\PropertyAccess\Exception\NoSuchPropertyException;
 use Symfony\Component\PropertyInfo\PropertyTypeExtractorInterface;
 use Symfony\Component\PropertyInfo\Type;
+use Symfony\Component\Serializer\Encoder\CsvEncoder;
 use Symfony\Component\Serializer\Encoder\JsonEncoder;
+use Symfony\Component\Serializer\Encoder\XmlEncoder;
 use Symfony\Component\Serializer\Exception\ExtraAttributesException;
 use Symfony\Component\Serializer\Exception\LogicException;
 use Symfony\Component\Serializer\Exception\NotNormalizableValueException;
@@ -94,6 +96,12 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     private $typesCache = [];
     private $attributesCache = [];
 
+    /**
+     * @deprecated since Symfony 4.2
+     *
+     * @var callable|null
+     */
+    private $maxDepthHandler;
     private $objectClassResolver;
 
     /**
@@ -123,7 +131,7 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     /**
      * {@inheritdoc}
      */
-    public function supportsNormalization($data, string $format = null)
+    public function supportsNormalization($data, $format = null)
     {
         return \is_object($data) && !$data instanceof \Traversable;
     }
@@ -131,7 +139,7 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     /**
      * {@inheritdoc}
      */
-    public function normalize($object, string $format = null, array $context = [])
+    public function normalize($object, $format = null, array $context = [])
     {
         if (!isset($context['cache_key'])) {
             $context['cache_key'] = $this->getCacheKey($format, $context);
@@ -164,7 +172,8 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
                 throw new InvalidArgumentException(sprintf('The "%s" given in the context is not callable.', self::MAX_DEPTH_HANDLER));
             }
         } else {
-            $maxDepthHandler = null;
+            // already validated in constructor resp by type declaration of setMaxDepthHandler
+            $maxDepthHandler = $this->defaultContext[self::MAX_DEPTH_HANDLER] ?? $this->maxDepthHandler;
         }
 
         foreach ($attributes as $attribute) {
@@ -181,7 +190,7 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
             /**
              * @var callable|null
              */
-            $callback = $context[self::CALLBACKS][$attribute] ?? $this->defaultContext[self::CALLBACKS][$attribute] ?? null;
+            $callback = $context[self::CALLBACKS][$attribute] ?? $this->defaultContext[self::CALLBACKS][$attribute] ?? $this->callbacks[$attribute] ?? null;
             if ($callback) {
                 $attributeValue = $callback($attributeValue, $object, $attribute, $format, $context);
             }
@@ -211,7 +220,7 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     /**
      * {@inheritdoc}
      */
-    protected function instantiateObject(array &$data, string $class, array &$context, \ReflectionClass $reflectionClass, $allowedAttributes, string $format = null)
+    protected function instantiateObject(array &$data, $class, array &$context, \ReflectionClass $reflectionClass, $allowedAttributes, string $format = null)
     {
         if ($this->classDiscriminatorResolver && $mapping = $this->classDiscriminatorResolver->getMappingForClass($class)) {
             if (!isset($data[$mapping->getTypeProperty()])) {
@@ -233,11 +242,12 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     /**
      * Gets and caches attributes for the given object, format and context.
      *
-     * @param object $object
+     * @param object      $object
+     * @param string|null $format
      *
      * @return string[]
      */
-    protected function getAttributes($object, string $format = null, array $context)
+    protected function getAttributes($object, $format = null, array $context)
     {
         $class = $this->objectClassResolver ? ($this->objectClassResolver)($object) : \get_class($object);
         $key = $class.'-'.$context['cache_key'];
@@ -272,21 +282,40 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     /**
      * Extracts attributes to normalize from the class of the given object, format and context.
      *
+     * @param object      $object
+     * @param string|null $format
+     *
      * @return string[]
      */
-    abstract protected function extractAttributes(object $object, string $format = null, array $context = []);
+    abstract protected function extractAttributes($object, $format = null, array $context = []);
 
     /**
      * Gets the attribute value.
      *
+     * @param object      $object
+     * @param string      $attribute
+     * @param string|null $format
+     *
      * @return mixed
      */
-    abstract protected function getAttributeValue(object $object, string $attribute, string $format = null, array $context = []);
+    abstract protected function getAttributeValue($object, $attribute, $format = null, array $context = []);
+
+    /**
+     * Sets a handler function that will be called when the max depth is reached.
+     *
+     * @deprecated since Symfony 4.2
+     */
+    public function setMaxDepthHandler(?callable $handler): void
+    {
+        @trigger_error(sprintf('The "%s()" method is deprecated since Symfony 4.2, use the "max_depth_handler" key of the context instead.', __METHOD__), E_USER_DEPRECATED);
+
+        $this->maxDepthHandler = $handler;
+    }
 
     /**
      * {@inheritdoc}
      */
-    public function supportsDenormalization($data, string $type, string $format = null)
+    public function supportsDenormalization($data, $type, $format = null)
     {
         return class_exists($type) || (interface_exists($type, false) && $this->classDiscriminatorResolver && null !== $this->classDiscriminatorResolver->getMappingForClass($type));
     }
@@ -294,7 +323,7 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     /**
      * {@inheritdoc}
      */
-    public function denormalize($data, string $type, string $format = null, array $context = [])
+    public function denormalize($data, $type, $format = null, array $context = [])
     {
         if (!isset($context['cache_key'])) {
             $context['cache_key'] = $this->getCacheKey($format, $context);
@@ -345,8 +374,13 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
 
     /**
      * Sets attribute value.
+     *
+     * @param object      $object
+     * @param string      $attribute
+     * @param mixed       $value
+     * @param string|null $format
      */
-    abstract protected function setAttributeValue(object $object, string $attribute, $value, string $format = null, array $context = []);
+    abstract protected function setAttributeValue($object, $attribute, $value, $format = null, array $context = []);
 
     /**
      * Validates the submitted data and denormalizes it.
@@ -376,6 +410,52 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
             // This is special to xml format only
             if ('xml' === $format && null !== $collectionValueType && (!\is_array($data) || !\is_int(key($data)))) {
                 $data = [$data];
+            }
+
+            // In XML and CSV all basic datatypes are represented as strings, it is e.g. not possible to determine,
+            // if a value is meant to be a string, float, int or a boolean value from the serialized representation.
+            // That's why we have to transform the values, if one of these non-string basic datatypes is epxected.
+            //
+            // This is special to xml and csv format
+            if (
+                (XmlEncoder::FORMAT === $format || CsvEncoder::FORMAT === $format) &&
+                \in_array($type->getBuiltinType(), [Type::BUILTIN_TYPE_BOOL, Type::BUILTIN_TYPE_INT, Type::BUILTIN_TYPE_FLOAT]) &&
+                \is_string($data)
+            ) {
+                switch ($type->getBuiltinType()) {
+                    case Type::BUILTIN_TYPE_BOOL:
+                        // according to https://www.w3.org/TR/xmlschema-2/#boolean, valid representations are "false", "true", "0" and "1"
+                        if ('false' === $data || '0' === $data) {
+                            $data = false;
+                        } elseif ('true' === $data || '1' === $data) {
+                            $data = true;
+                        }
+                        break;
+                    case Type::BUILTIN_TYPE_INT:
+                        if (
+                            true === ctype_digit($data) ||
+                            '-' == $data[0] && true === ctype_digit(substr($data, 1))
+                        ) {
+                            $data = (int) $data;
+                        }
+                        break;
+                    case Type::BUILTIN_TYPE_FLOAT:
+                        if (is_numeric($data)) {
+                            return '0x' === $data[0].$data[1] ? hexdec($data) : (float) $data;
+                        } elseif (
+                            true === ctype_digit($data) ||
+                            '-' == $data[0] && true === ctype_digit(substr($data, 1))
+                        ) {
+                            $data = (int) $data;
+                        } elseif ('NaN' === $data) {
+                            return NAN;
+                        } elseif ('INF') {
+                            return INF;
+                        } elseif ('-INF') {
+                            return -INF;
+                        }
+                        break;
+                }
             }
 
             if (null !== $collectionValueType && Type::BUILTIN_TYPE_OBJECT === $collectionValueType->getBuiltinType()) {
@@ -448,7 +528,7 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
     /**
      * @internal
      */
-    protected function denormalizeParameter(\ReflectionClass $class, \ReflectionParameter $parameter, string $parameterName, $parameterData, array $context, string $format = null)
+    protected function denormalizeParameter(\ReflectionClass $class, \ReflectionParameter $parameter, $parameterName, $parameterData, array $context, $format = null)
     {
         if (null === $this->propertyTypeExtractor || null === $types = $this->propertyTypeExtractor->getTypes($class->getName(), $parameterName)) {
             return parent::denormalizeParameter($class, $parameter, $parameterName, $parameterData, $context, $format);
@@ -553,10 +633,19 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
      *
      * {@inheritdoc}
      *
+     * @param string|null $format
+     *
      * @internal
      */
-    protected function createChildContext(array $parentContext, string $attribute, ?string $format): array
+    protected function createChildContext(array $parentContext, $attribute/*, ?string $format */): array
     {
+        if (\func_num_args() >= 3) {
+            $format = func_get_arg(2);
+        } else {
+            @trigger_error(sprintf('Method "%s::%s()" will have a third "?string $format" argument in version 5.0; not defining it is deprecated since Symfony 4.3.', \get_class($this), __FUNCTION__), E_USER_DEPRECATED);
+            $format = null;
+        }
+
         $context = parent::createChildContext($parentContext, $attribute, $format);
         $context['cache_key'] = $this->getCacheKey($format, $context);
 
@@ -581,7 +670,8 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
         try {
             return md5($format.serialize([
                 'context' => $context,
-                'ignored' => $context[self::IGNORED_ATTRIBUTES] ?? $this->defaultContext[self::IGNORED_ATTRIBUTES],
+                'ignored' => $this->ignoredAttributes,
+                'camelized' => $this->camelizedAttributes,
             ]));
         } catch (\Exception $exception) {
             // The context cannot be serialized, skip the cache
