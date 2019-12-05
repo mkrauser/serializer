@@ -308,6 +308,16 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
         $object = $this->instantiateObject($normalizedData, $type, $context, $reflectionClass, $allowedAttributes, $format);
         $resolvedClass = $this->objectClassResolver ? ($this->objectClassResolver)($object) : \get_class($object);
 
+        if (\is_string($data) && 'xml' === $format && $this->classMetadataFactory->hasMetadataFor($type)) {
+            $attributes = $this->classMetadataFactory->getMetadataFor($type)->getAttributesMetadata();
+            foreach ($attributes as $attribute) {
+                if ('#' === $attribute->getSerializedName()) {
+                    $normalizedData = ['#' => $data];
+                    break;
+                }
+            }
+        }
+
         foreach ($normalizedData as $attribute => $value) {
             if ($this->nameConverter) {
                 $attribute = $this->nameConverter->denormalize($attribute, $resolvedClass, $format, $context);
@@ -376,6 +386,57 @@ abstract class AbstractObjectNormalizer extends AbstractNormalizer
             // This is special to xml format only
             if ('xml' === $format && null !== $collectionValueType && (!\is_array($data) || !\is_int(key($data)))) {
                 $data = [$data];
+            }
+
+            // In XML and CSV all basic datatypes are represented as strings, it is e.g. not possible to determine,
+            // if a value is meant to be a string, float, int or a boolean value from the serialized representation.
+            // That's why we have to transform the values, if one of these non-string basic datatypes is expected.
+            //
+            // This is special to xml and csv format
+            if (
+                \is_string($data) && (XmlEncoder::FORMAT === $format || CsvEncoder::FORMAT === $format)
+            ) {
+                if (
+                    '' === $data && $type->isNullable() && \in_array($type->getBuiltinType(), [Type::BUILTIN_TYPE_BOOL, Type::BUILTIN_TYPE_INT, Type::BUILTIN_TYPE_FLOAT], true)
+                ) {
+                    return null;
+                }
+                switch ($type->getBuiltinType()) {
+                    case Type::BUILTIN_TYPE_BOOL:
+                        // according to https://www.w3.org/TR/xmlschema-2/#boolean, valid representations are "false", "true", "0" and "1"
+                        if ('false' === $data || '0' === $data) {
+                            $data = false;
+                        } elseif ('true' === $data || '1' === $data) {
+                            $data = true;
+                        } else {
+                            throw new NotNormalizableValueException(sprintf('The type of the "%s" attribute for class "%s" must be bool ("%s" given).', $attribute, $currentClass, $data));
+                        }
+                        break;
+                    case Type::BUILTIN_TYPE_INT:
+                        if (
+                            ctype_digit($data) ||
+                            '-' === $data[0] && ctype_digit(substr($data, 1))
+                        ) {
+                            $data = (int) $data;
+                        } else {
+                            throw new NotNormalizableValueException(sprintf('The type of the "%s" attribute for class "%s" must be int ("%s" given).', $attribute, $currentClass, $data));
+                        }
+                        break;
+                    case Type::BUILTIN_TYPE_FLOAT:
+                        if (is_numeric($data)) {
+                            return (float) $data;
+                        }
+                        if ('NaN' === $data) {
+                            return NAN;
+                        } elseif ('INF') {
+                            return INF;
+                        } elseif ('-INF') {
+                            return -INF;
+                        } else {
+                            throw new NotNormalizableValueException(sprintf('The type of the "%s" attribute for class "%s" must be float ("%s" given).', $attribute, $currentClass, $data));
+                        }
+                        break;
+                }
             }
 
             if (null !== $collectionValueType && Type::BUILTIN_TYPE_OBJECT === $collectionValueType->getBuiltinType()) {
