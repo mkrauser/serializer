@@ -34,6 +34,8 @@ use Symfony\Component\Serializer\Tests\Fixtures\AbstractDummy;
 use Symfony\Component\Serializer\Tests\Fixtures\AbstractDummyFirstChild;
 use Symfony\Component\Serializer\Tests\Fixtures\AbstractDummySecondChild;
 use Symfony\Component\Serializer\Tests\Fixtures\DummySecondChildQuux;
+use Symfony\Component\Serializer\Annotation\SerializedName;
+use Symfony\Component\Serializer\NameConverter\MetadataAwareNameConverter;
 
 class AbstractObjectNormalizerTest extends TestCase
 {
@@ -196,14 +198,15 @@ class AbstractObjectNormalizerTest extends TestCase
     {
         $factory = new ClassMetadataFactory(new AnnotationLoader(new AnnotationReader()));
 
-        $loaderMock = new class() implements ClassMetadataFactoryInterface {
+        $loaderMock = new class() implements ClassMetadataFactoryInterface
+        {
             public function getMetadataFor($value): ClassMetadataInterface
             {
                 if (AbstractDummy::class === $value) {
                     return new ClassMetadata(
                         AbstractDummy::class,
                         new ClassDiscriminatorMapping('type', [
-                            'first' => AbstractDummyFirstChild::class,
+                            'first'  => AbstractDummyFirstChild::class,
                             'second' => AbstractDummySecondChild::class,
                         ])
                     );
@@ -225,6 +228,24 @@ class AbstractObjectNormalizerTest extends TestCase
         $normalizedData = $normalizer->denormalize(['foo' => 'foo', 'baz' => 'baz', 'quux' => ['value' => 'quux'], 'type' => 'second'], AbstractDummy::class);
 
         $this->assertInstanceOf(DummySecondChildQuux::class, $normalizedData->quux);
+    }
+
+    public function testDenormalizeXmlStringNodeWithoutAttributesToObject()
+    {
+        $denormalizer = $this->getDenormalizerForStringNode();
+        // if an xml-node can have children which should be deserialized as string[]
+        // and only one child exists
+        $object = $denormalizer->denormalize('string-value', DummyObjectWithOptionalAttributes::class, 'xml');
+        $this->assertInstanceOf(DummyObjectWithOptionalAttributes::class, $object);
+        $this->assertEquals('string-value', $object->value);
+        $this->assertNull($object->foo);
+    }
+    public function getDenormalizerForStringNode()
+    {
+        $denormalizer = new AbstractObjectNormalizerWithMetadataAndNameConverter();
+        $serializer = new Serializer([$denormalizer]);
+        $denormalizer->setSerializer($serializer);
+        return $denormalizer;
     }
 
     /**
@@ -259,17 +280,17 @@ class AbstractObjectNormalizerTest extends TestCase
         // bool
         $objectWithBooleanProperties = $denormalizer->denormalize(
             [
-                'boolTrue1' => 'true',
-                'boolFalse1' => 'false',
-                'boolTrue2' => '1',
-                'boolFalse2' => '0',
-                'int1' => '4711',
-                'int2' => '-4711',
-                'float1' => '123.456',
-                'float2' => '-1.2344e56',
-                'float3' => '45E-6',
-                'floatNaN' => 'NaN',
-                'floatInf' => 'INF',
+                'boolTrue1'   => 'true',
+                'boolFalse1'  => 'false',
+                'boolTrue2'   => '1',
+                'boolFalse2'  => '0',
+                'int1'        => '4711',
+                'int2'        => '-4711',
+                'float1'      => '123.456',
+                'float2'      => '-1.2344e56',
+                'float3'      => '45E-6',
+                'floatNaN'    => 'NaN',
+                'floatInf'    => 'INF',
                 'floatNegInf' => '-INF',
             ],
             ObjectWithBasicProperties::class,
@@ -407,6 +428,40 @@ class StringCollection
 {
     /** @var string[] */
     public $children;
+}
+
+class AbstractObjectNormalizerWithMetadataAndNameConverter extends AbstractObjectNormalizer
+{
+    public function __construct()
+    {
+        $classMetadataFactory = new ClassMetadataFactory(new AnnotationLoader(new AnnotationReader()));
+        parent::__construct($classMetadataFactory, new MetadataAwareNameConverter($classMetadataFactory));
+    }
+    protected function extractAttributes($object, $format = null, array $context = [])
+    {
+    }
+    protected function getAttributeValue($object, $attribute, $format = null, array $context = [])
+    {
+    }
+    protected function setAttributeValue($object, $attribute, $value, $format = null, array $context = [])
+    {
+        $object->$attribute = $value;
+    }
+}
+class DummyObjectWithOptionalAttributes
+{
+    /**
+     * @SerializedName("#")
+     *
+     * @var string
+     */
+    public $value;
+    /**
+     * @SerializedName("@foo")
+     *
+     * @var string
+     */
+    public $foo = null;
 }
 
 class DummyCollection
